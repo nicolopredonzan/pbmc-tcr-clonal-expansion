@@ -1,0 +1,13 @@
+"cell_type","cells_TCR11","cells_in_expanded","frac_expanded"
+"CD4 T (memory/naive)",1614,11,0.00681536555142503
+"CD14+ monocytes",47,2,0.0425531914893617
+"Naive T (CD4/CD8 unresolved)",780,0,0
+"CD8 GZMK+ memory/effector",463,104,0.224622030237581
+"Unassigned",102,1,0.00980392156862745
+"CD8 naive",373,0,0
+"B cells",20,0,0
+"NK cells",3,1,0.333333333333333
+"CD16+ monocytes",3,0,0
+"GZMK+ T",71,6,0.0845070422535211
+"Non-immune (possible contamination)",2,1,0.5
+"Non-immune (not interpreted)",3,0,0

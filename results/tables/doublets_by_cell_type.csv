@@ -1,0 +1,13 @@
+"cell_type","cells","doublets","frac_doublets","expanded_cells","expanded_doublets"
+"CD4 T (memory/naive)",2056,155,0.0753891050583658,11,0
+"CD14+ monocytes",1303,94,0.0721412125863392,2,2
+"Naive T (CD4/CD8 unresolved)",1036,29,0.027992277992278,0,0
+"CD8 GZMK+ memory/effector",781,91,0.11651728553137,104,5
+"Unassigned",676,20,0.029585798816568,1,0
+"CD8 naive",526,23,0.0437262357414449,0,0
+"B cells",481,39,0.0810810810810811,0,0
+"NK cells",153,13,0.0849673202614379,1,1
+"CD16+ monocytes",150,5,0.0333333333333333,0,0
+"MAIT cells",128,9,0.0703125,6,2
+"pDC",31,2,0.0645161290322581,1,1
+"Platelets",29,0,0,0,0

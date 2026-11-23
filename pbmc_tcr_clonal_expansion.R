@@ -1,6 +1,6 @@
 # =============================================================================
 # Clonal expansion vs transcriptional state in healthy-donor PBMC
-# Paired 5' scRNA-seq + scTCR-seq (10x Genomics), R / Seurat v5
+# Paired 5' scRNA-seq + scTCR-seq (10x Genomics), R / Seurat (v5 API, run with Seurat 6.0.0)
 # =============================================================================
 # Question (fixed before looking at clone counts per group):
 #   Are expanded T-cell clones (>= 3 cells sharing the same TCR) found in
@@ -15,9 +15,10 @@
 #     - ..._vdj_t_filtered_contig_annotations.csv
 #
 # Definitions
-#   - Clone: identical CDR3-alpha + CDR3-beta pair, only in cells with exactly
-#     one productive TRA and one productive TRB contig (TCR "1+1").
+#   - Clone: identical CDR3-alpha + CDR3-beta pair (amino acids), only in cells
+#     with exactly one productive TRA and one productive TRB contig (TCR "1+1").
 #     Cells with two alpha chains or a missing chain are NOT assigned to a clone.
+#     Sensitivity check: same definition plus identical TRAV and TRBV genes.
 #   - Expanded clone: >= EXPANDED_MIN_SIZE cells (counted after QC, all cells).
 #
 # Limitations (state them in the README)
@@ -27,9 +28,11 @@
 #   - The "Naive T" cluster mixes CD4 and CD8 naive cells (not resolved by RNA).
 #   - Cluster-to-label mapping is hard-coded for this exact run (seed, Seurat
 #     version, parameters); sanity checks below stop the script if it breaks.
-#   - Donor sex: the 10x page reports a female donor, but Y-linked genes are
-#     detected in many cells (see results/tables/sex_check.csv). This does not affect
-#     the question asked here.
+#   - Doublets are flagged (scDblFinder) but NOT removed: removing cells would
+#     change the clustering and therefore the hard-coded cluster labels.
+#   - Donor sex: the 10x page reports a female donor, but XIST is not detected
+#     and Y-linked genes are detected in most cells (results/tables/sex_check.csv):
+#     the cells are from a male donor. This does not affect the question.
 # =============================================================================
 
 suppressPackageStartupMessages({
@@ -58,9 +61,15 @@ EXPANDED_MIN_SIZE <- 3
 # Test groups are defined from cluster IDs at RESOLUTION (chosen from markers)
 NAIVE_CLUSTERS           <- c("2", "5")
 EFFECTOR_CLUSTERS        <- c("3", "9")   # main definition
-EFFECTOR_CLUSTERS_STRICT <- c("3")        # sensitivity: cluster 9 label is less certain
+EFFECTOR_CLUSTERS_STRICT <- c("3")        # sensitivity: cluster 9 may be MAIT cells (see MAIT check)
 
-RUN_MARKERS <- TRUE   # FindMarkers for uncertain clusters (a few minutes)
+# MAIT cells: semi-invariant TCR alpha chain TRAV1-2 joined to TRAJ33 (canonical),
+# TRAJ12 or TRAJ20
+MAIT_TRAV <- "TRAV1-2"
+MAIT_TRAJ <- c("TRAJ33", "TRAJ12", "TRAJ20")
+
+RUN_MARKERS  <- TRUE   # FindMarkers for uncertain clusters (a few minutes)
+RUN_DOUBLETS <- TRUE   # scDblFinder (Bioconductor); skipped if not installed
 
 dir.create(FIG_DIR, recursive = TRUE, showWarnings = FALSE)
 dir.create(RES_DIR, recursive = TRUE, showWarnings = FALSE)
@@ -77,7 +86,7 @@ message("Cells after loading: ", ncol(obj))
 
 # ---- 2. Load TCR contigs ----------------------------------------------------
 ctg <- read.csv(CONTIG_PATH, stringsAsFactors = FALSE)
-stopifnot(all(c("barcode", "chain", "productive", "cdr3") %in% colnames(ctg)))
+stopifnot(all(c("barcode", "chain", "productive", "cdr3", "v_gene", "j_gene") %in% colnames(ctg)))
 print(table(chain = ctg$chain, productive = ctg$productive))
 
 # note: 'productive' is lowercase "true" in this file
@@ -95,6 +104,9 @@ per_cell <- ctg %>%
     n_TRB = sum(chain == "TRB"),
     TRA   = paste(sort(unique(cdr3[chain == "TRA"])), collapse = ";"),
     TRB   = paste(sort(unique(cdr3[chain == "TRB"])), collapse = ";"),
+    TRAV  = paste(sort(unique(v_gene[chain == "TRA"])), collapse = ";"),
+    TRAJ  = paste(sort(unique(j_gene[chain == "TRA"])), collapse = ";"),
+    TRBV  = paste(sort(unique(v_gene[chain == "TRB"])), collapse = ";"),
     .groups = "drop"
   )
 message("Cells with a TCR: ", nrow(per_cell))
@@ -107,12 +119,15 @@ stopifnot(n_match == nrow(per_cell))
 
 # ---- 3. Clone definition (before QC, used for the QC justification) --------
 per_cell <- per_cell %>%
-  mutate(paired_1_1 = n_TRA == 1 & n_TRB == 1,
-         clone_id   = ifelse(paired_1_1, paste(TRA, TRB, sep = "|"), NA))
+  mutate(paired_1_1  = n_TRA == 1 & n_TRB == 1,
+         clone_id    = ifelse(paired_1_1, paste(TRA, TRB, sep = "|"), NA),
+         clone_id_vj = ifelse(paired_1_1, paste(TRAV, TRA, TRBV, TRB, sep = "|"), NA))
 md_tcr <- tibble::column_to_rownames(
-  per_cell[, c("barcode", "n_TRA", "n_TRB", "paired_1_1", "clone_id")], "barcode")
+  per_cell[, c("barcode", "n_TRA", "n_TRB", "paired_1_1", "clone_id", "clone_id_vj",
+               "TRAV", "TRAJ", "TRBV")], "barcode")
 obj <- AddMetaData(obj, md_tcr)
 obj$has_TCR <- !is.na(obj$n_TRA)
+obj$mait_tcr <- obj$paired_1_1 %in% TRUE & obj$TRAV %in% MAIT_TRAV & obj$TRAJ %in% MAIT_TRAJ
 message("Cells with TCR 1+1: ", sum(obj$paired_1_1, na.rm = TRUE))
 
 # ---- 4. QC plots (before filtering) ----------------------------------------
@@ -188,6 +203,41 @@ print(table(clone_size = as.integer(cs)))
 message("Expanded clones (>= ", EXPANDED_MIN_SIZE, " cells): ",
         sum(as.integer(cs) >= EXPANDED_MIN_SIZE))
 
+# sensitivity: does adding the V genes to the clone definition change the result?
+cs_vj <- table(obj$clone_id_vj)
+clone_def_cmp <- data.frame(
+  definition        = c("CDR3a + CDR3b (main)", "TRAV + CDR3a + TRBV + CDR3b"),
+  clones            = c(length(cs), length(cs_vj)),
+  expanded_clones   = c(sum(cs >= EXPANDED_MIN_SIZE), sum(cs_vj >= EXPANDED_MIN_SIZE)),
+  cells_in_expanded = c(sum(cs[cs >= EXPANDED_MIN_SIZE]), sum(cs_vj[cs_vj >= EXPANDED_MIN_SIZE])))
+print(clone_def_cmp)
+write.csv(clone_def_cmp, file.path(RES_DIR, "clone_definition_comparison.csv"), row.names = FALSE)
+
+# clone size distribution
+size_df <- as.data.frame(table(clone_size = as.integer(cs)))
+save_plot(ggplot(size_df, aes(clone_size, Freq)) +
+            geom_col(fill = "steelblue") +
+            geom_text(aes(label = Freq), vjust = -0.3, size = 3) +
+            scale_y_log10() + theme_classic() +
+            labs(x = "Clone size (cells)", y = "Number of clones (log scale)",
+                 title = "Clone size distribution (TCR 1+1 cells after QC)"),
+          "18_clone_size_distribution", 6, 4)
+
+# ---- 6b. Doublet detection (flag only, cells are NOT removed) ---------------
+obj$dbl_class <- NA_character_
+obj$dbl_score <- NA_real_
+if (RUN_DOUBLETS && requireNamespace("scDblFinder", quietly = TRUE)) {
+  sce <- SingleCellExperiment::SingleCellExperiment(
+    list(counts = LayerData(obj, assay = "RNA", layer = "counts")))
+  set.seed(42)
+  sce <- scDblFinder::scDblFinder(sce)
+  obj$dbl_class <- as.character(sce$scDblFinder.class)
+  obj$dbl_score <- sce$scDblFinder.score
+  print(table(doublet = obj$dbl_class))
+} else {
+  message("scDblFinder not run (install with BiocManager::install('scDblFinder')).")
+}
+
 # ---- 7. Normalisation, HVGs, PCA -------------------------------------------
 obj <- NormalizeData(obj, verbose = FALSE)
 obj <- FindVariableFeatures(obj, nfeatures = N_HVG, verbose = FALSE)
@@ -221,10 +271,21 @@ save_plot(DotPlot(obj, features = marker_genes, group.by = "cluster") + RotatedA
 save_plot(FeaturePlot(obj, c("CD3E", "CD4", "CD8A", "CCR7", "GZMH", "NKG7")),
           "09_featureplot_markers", 10, 7)
 
+# second panel for the minor / uncertain populations:
+#   pDC (LILRA4, CLEC4C, IL3RA), platelets (PPBP, PF4, GP9), cDC (FCER1A, CD1C),
+#   MAIT (KLRB1, SLC4A10, ZBTB16), gamma-delta T (TRDC, TRGC1/2),
+#   CD8 TEMRA vs GZMK+ memory (GNLY, CX3CR1, FGFBP2), proliferating (MKI67)
+extra_markers <- intersect(c("LILRA4", "CLEC4C", "IL3RA", "PPBP", "PF4", "GP9",
+                             "FCER1A", "CD1C", "KLRB1", "SLC4A10", "ZBTB16",
+                             "TRDC", "TRGC1", "TRGC2", "GNLY", "CX3CR1", "FGFBP2", "MKI67"),
+                           rownames(obj))
+save_plot(DotPlot(obj, features = extra_markers, group.by = "cluster") + RotatedAxis(),
+          "08b_dotplot_extra_markers_by_cluster", 11, 6)
+
 if (RUN_MARKERS) {
   # p-values are NOT interpreted (cells from one donor are not independent);
   # clusters are judged on log2FC and the fraction of expressing cells.
-  for (cl_id in c("2", "4", "8", "10", "11")) {
+  for (cl_id in c("2", "4", "8", "9", "10", "11")) {
     m <- FindMarkers(obj, ident.1 = cl_id, only.pos = TRUE, min.pct = 0.25)
     m <- m[order(-m$avg_log2FC), ]
     write.csv(head(m, 20), file.path(RES_DIR, paste0("markers_cluster_", cl_id, ".csv")))
@@ -243,7 +304,11 @@ message("XIST detected in ", sum(gex["XIST", ] > 0), " / ", ncol(gex), " cells (
 print(round(prop.table(table(cluster = obj$cluster, has_TCR = obj$has_TCR), 1), 2))
 
 # ---- 11. Cell-type labels ---------------------------------------------------
-# Based on marker genes (DotPlot + FindMarkers). Uncertain: clusters 4, 8, 9, 10, 11.
+# Based on marker genes (DotPlot, extra-marker DotPlot, FindMarkers).
+#   cluster 10: SCT, LRRC26, GZMB, CD4, no CD3E  -> plasmacytoid DC
+#   cluster 11: GP9, PVALB, TMEM40, CABP5        -> platelets
+#   cluster 9 : CD8 low, IL7R, GZMK, NKG7        -> possibly MAIT (see MAIT check)
+#   cluster 4 : CD3E+, IL7R+, no clear markers   -> left unassigned
 lab <- c("0"  = "CD4 T (memory/naive)",
          "1"  = "CD14+ monocytes",
          "2"  = "Naive T (CD4/CD8 unresolved)",
@@ -254,8 +319,8 @@ lab <- c("0"  = "CD4 T (memory/naive)",
          "7"  = "NK cells",
          "8"  = "CD16+ monocytes",
          "9"  = "GZMK+ T",
-         "10" = "Non-immune (possible contamination)",
-         "11" = "Non-immune (not interpreted)")
+         "10" = "pDC",
+         "11" = "Platelets")
 stopifnot(all(obj$cluster %in% names(lab)))
 obj$cell_type <- factor(unname(lab[obj$cluster]), levels = unname(lab))
 
@@ -270,6 +335,8 @@ check_marker <- function(label, gene) {
 check_marker("B cells", "MS4A1")
 check_marker("CD14+ monocytes", "CD14")
 check_marker("NK cells", "FGFBP2")
+check_marker("pDC", "LILRA4")
+check_marker("Platelets", "PPBP")
 
 save_plot(DimPlot(obj, group.by = "cell_type", label = TRUE, repel = TRUE, label.size = 3),
           "10_umap_cell_types", 10, 6)
@@ -286,6 +353,26 @@ obj$test_group_strict <- case_when(
   obj$cluster %in% EFFECTOR_CLUSTERS_STRICT ~ "CD8 memory/effector T",
   TRUE ~ NA_character_)
 save_plot(DimPlot(obj, group.by = "test_group"), "12_umap_test_groups")
+
+t_types <- c("CD4 T (memory/naive)", "Naive T (CD4/CD8 unresolved)", "CD8 naive",
+             "CD8 GZMK+ memory/effector", "GZMK+ T")
+
+# ---- 11b. MAIT check (TCR + RNA, per cluster) -------------------------------
+# MAIT cells: TRAV1-2 with TRAJ33/12/20, KLRB1+ SLC4A10+ ZBTB16+.
+mait_genes <- intersect(c("KLRB1", "SLC4A10", "ZBTB16"), rownames(obj))
+mait_df <- cbind(obj@meta.data[, c("cluster", "cell_type", "paired_1_1", "TRAV", "mait_tcr")],
+                 FetchData(obj, mait_genes))
+mait_check <- mait_df %>%
+  group_by(cluster, cell_type) %>%
+  summarise(n_cells       = n(),
+            n_TCR11       = sum(paired_1_1 %in% TRUE),
+            frac_TRAV1_2  = mean(TRAV[paired_1_1 %in% TRUE] %in% MAIT_TRAV),
+            frac_MAIT_TCR = mean(mait_tcr[paired_1_1 %in% TRUE]),
+            across(all_of(mait_genes), ~ mean(.x > 0), .names = "frac_{.col}_pos"),
+            .groups = "drop") %>%
+  arrange(desc(frac_MAIT_TCR))
+print(mait_check, width = Inf)
+write.csv(mait_check, file.path(RES_DIR, "mait_check_by_cluster.csv"), row.names = FALSE)
 
 # ---- 12. Clonal expansion by group -----------------------------------------
 summarise_groups <- function(group_col) {
@@ -314,19 +401,54 @@ by_type <- obj@meta.data %>%
 print(by_type)
 write.csv(by_type, file.path(RES_DIR, "expanded_by_cell_type.csv"), row.names = FALSE)
 
-# clone-level table
+# repertoire diversity per T-cell type. Shannon entropy depends on the number of
+# cells, so it is also computed after random downsampling to the smallest group.
+shannon <- function(ids) { p <- as.numeric(table(ids)) / length(ids); -sum(p * log(p)) }
+div_df <- obj@meta.data %>%
+  filter(paired_1_1 %in% TRUE, cell_type %in% t_types) %>%
+  mutate(cell_type = droplevels(cell_type))
+n_min <- min(table(div_df$cell_type))
+set.seed(42)
+rep_div <- div_df %>%
+  group_by(cell_type) %>%
+  summarise(cells_TCR11      = n(),
+            clones           = n_distinct(clone_id),
+            shannon          = shannon(clone_id),
+            shannon_rarefied = mean(replicate(200, shannon(sample(clone_id, n_min)))),
+            .groups = "drop") %>%
+  mutate(n_rarefied = n_min)
+print(rep_div)
+write.csv(rep_div, file.path(RES_DIR, "repertoire_diversity_by_cell_type.csv"), row.names = FALSE)
+
+# clone-level table (with V/J genes, MAIT-like TCR and doublet flags)
 clones <- obj@meta.data %>%
   filter(paired_1_1 %in% TRUE) %>%
   group_by(clone_id) %>%
   summarise(size = n(),
             n_cell_types = n_distinct(cell_type),
             dominant_cell_type = names(which.max(table(cell_type))),
+            TRAV = first(TRAV), TRAJ = first(TRAJ), TRBV = first(TRBV),
+            mait_tcr = first(mait_tcr),
+            n_doublets = sum(dbl_class %in% "doublet"),
             .groups = "drop") %>%
   arrange(desc(size))
 write.csv(clones, file.path(RES_DIR, "clone_table.csv"), row.names = FALSE)
 cat("\nClones spanning >1 cell type (expanded only): ",
     sum(clones$n_cell_types > 1 & clones$size >= EXPANDED_MIN_SIZE), "\n")
-print(head(clones %>% filter(size >= EXPANDED_MIN_SIZE), 10))
+print(head(clones %>% filter(size >= EXPANDED_MIN_SIZE), 10), width = Inf)
+
+# doublet fraction per cell type
+if (any(!is.na(obj$dbl_class))) {
+  dbl_by_type <- obj@meta.data %>%
+    group_by(cell_type) %>%
+    summarise(cells = n(), doublets = sum(dbl_class %in% "doublet"),
+              frac_doublets = mean(dbl_class %in% "doublet"),
+              expanded_cells = sum(expanded),
+              expanded_doublets = sum(expanded & dbl_class %in% "doublet"),
+              .groups = "drop")
+  print(dbl_by_type)
+  write.csv(dbl_by_type, file.path(RES_DIR, "doublets_by_cell_type.csv"), row.names = FALSE)
+}
 
 # ---- 13. Figures: expanded clones -------------------------------------------
 # (a) fraction of cells in expanded clones, by cell type
@@ -358,11 +480,9 @@ add_labels <- function() {
                            max.overlaps = Inf, seed = 42)
 }
 
-# Cell-type colours (muted; non-T / unassigned in greys) for the legend panels
+# Cell-type colours (muted; unassigned in grey) for the legend panels
 ct_levels <- sort(unique(as.character(um$cell_type)))
 ct_pal <- setNames(scales::hue_pal(c = 60, l = 70)(length(ct_levels)), ct_levels)
-ct_pal[grepl("^Non-immune", names(ct_pal))] <- c("grey45", "grey65")[
-  seq_len(sum(grepl("^Non-immune", names(ct_pal))))]
 ct_pal["Unassigned"] <- "grey80"
 um$cell_type <- factor(um$cell_type, levels = ct_levels)
 
@@ -374,8 +494,8 @@ other_name <- "Other expanded clones"
 # expanded clones share one dark grey, so the legend can be read completely.
 okabe <- c("#E69F00", "#56B4E9", "#009E73", "#D55E00", "#CC79A7", "#0072B2")
 pal <- c(setNames(okabe[seq_len(top_n)], top_ids), setNames("grey35", other_name))
-lab <- c(paste0(top_ids, " (n=", exp_clones$size[seq_len(top_n)], ")"),
-         paste0(other_name, " (", nrow(exp_clones) - top_n, " clones)"))
+clone_lab <- c(paste0(top_ids, " (n=", exp_clones$size[seq_len(top_n)], ")"),
+               paste0(other_name, " (", nrow(exp_clones) - top_n, " clones)"))
 
 um_e <- um[um$expanded, ]
 um_e$grp <- factor(ifelse(um_e$clone_id %in% top_ids, um_e$clone_id, other_name),
@@ -396,7 +516,7 @@ plot_clones <- function(d, de, title, caption = NULL) {
     geom_point(data = d[!d$expanded, ], aes(UMAP_1, UMAP_2), color = "grey88", size = 0.3) +
     geom_point(data = de, aes(UMAP_1, UMAP_2, fill = grp),
                shape = 21, color = "black", stroke = 0.25, size = 2) +
-    scale_fill_manual(values = pal, labels = lab, name = "Expanded clones\n(CDR3a|CDR3b)",
+    scale_fill_manual(values = pal, labels = clone_lab, name = "Expanded clones\n(CDR3a|CDR3b)",
                       drop = FALSE) +
     theme_classic() + labs(x = "umap_1", y = "umap_2", title = title, caption = caption)
 }
@@ -410,8 +530,6 @@ save_plot(patchwork::wrap_plots(p14a, p14b, widths = c(1, 1.25)) +
           "14_umap_expanded_clones", 18, 6)
 
 # Figure 17: zoom on T-cell clusters only (the question of the project)
-t_types <- c("CD4 T (memory/naive)", "Naive T (CD4/CD8 unresolved)", "CD8 naive",
-             "CD8 GZMK+ memory/effector", "GZMK+ T")
 um_t   <- um[um$cell_type %in% t_types, ]
 um_t$cell_type <- droplevels(um_t$cell_type)
 um_te  <- um_e[um_e$cell_type %in% t_types, ]
@@ -453,15 +571,27 @@ save_plot(DotPlot(t11, features = c("CCL5", "NKG7", "GZMK", "GZMH", "CD8A",
                                  title = "Expanded vs non-expanded TCR 1+1 cells"),
           "16_dotplot_expanded_vs_not", 7, 3.5)
 
-# Cells of expanded clones that fall outside the two test groups (QC check:
-# monocyte/NK/non-immune labels in a TCR clone are most likely doublets or ambient TCR)
+# Cells of expanded clones that fall outside the two test groups. Clones whose
+# cells all sit in the CD4 T cluster are plausible CD4 memory expansions; single
+# cells with monocyte/NK/pDC labels are more likely doublets or ambient TCR
+# (check the dbl_class column).
 outside <- obj@meta.data %>%
   filter(expanded, !test_group %in% c("CD8 memory/effector T", "Naive T")) %>%
-  select(cell_type, clone_id, clone_size, nFeature_RNA, nCount_RNA, percent.mt)
+  select(cell_type, clone_id, clone_size, nFeature_RNA, nCount_RNA, percent.mt,
+         any_of(c("dbl_class", "dbl_score")))
 write.csv(outside, file.path(RES_DIR, "expanded_cells_outside_test_groups.csv"))
 print(table(outside$cell_type))
 
-# ---- 14. Save ---------------------------------------------------------------
+# ---- 14. Internal consistency checks ----------------------------------------
+stopifnot(
+  sum(cs) == sum(obj$paired_1_1, na.rm = TRUE),                        # every 1+1 cell has one clone
+  sum(by_type$cells_in_expanded) == sum(obj$expanded),                  # no expanded cell lost
+  nrow(outside) + sum(res_main$cells_in_expanded) == sum(obj$expanded), # groups + outside = all
+  sum(exp_clones$size) == sum(obj$expanded)
+)
+message("Consistency checks passed.")
+
+# ---- 15. Save ---------------------------------------------------------------
 saveRDS(obj, file.path(RES_DIR, "obj_labeled.rds"))
 writeLines(capture.output(sessionInfo()), file.path(RES_DIR, "sessionInfo.txt"))
 message("Done.")

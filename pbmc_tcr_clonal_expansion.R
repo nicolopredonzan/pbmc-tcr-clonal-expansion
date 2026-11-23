@@ -61,9 +61,14 @@ RESOLUTION_ALT  <- 0.6    # only for comparison
 EXPANDED_MIN_SIZE <- 3
 
 # Test groups are defined from cluster IDs at RESOLUTION (chosen from markers)
-NAIVE_CLUSTERS           <- c("2", "5")
-EFFECTOR_CLUSTERS        <- c("3", "9")   # main definition
-EFFECTOR_CLUSTERS_STRICT <- c("3")        # sensitivity: cluster 9 may be MAIT cells (see MAIT check)
+# The effector group was first pre-specified as clusters 3 + 9. The MAIT check
+# (section 11b) then identified cluster 9 as MAIT cells (semi-invariant TCR), so
+# MAIT cells are reported as a separate group; the original 3 + 9 definition is
+# still reported (clones_by_group_original_definition.csv).
+NAIVE_CLUSTERS        <- c("2", "5")
+EFFECTOR_CLUSTERS     <- c("3")        # CD8 GZMK+ memory/effector
+MAIT_CLUSTERS         <- c("9")        # MAIT cells
+EFFECTOR_CLUSTERS_ORIG <- c("3", "9")  # original pre-specified definition
 
 # MAIT cells: semi-invariant TCR alpha chain TRAV1-2 joined to TRAJ33 (canonical),
 # TRAJ12 or TRAJ20
@@ -309,7 +314,8 @@ print(round(prop.table(table(cluster = obj$cluster, has_TCR = obj$has_TCR), 1), 
 # Based on marker genes (DotPlot, extra-marker DotPlot, FindMarkers).
 #   cluster 10: SCT, LRRC26, GZMB, CD4, no CD3E  -> plasmacytoid DC
 #   cluster 11: GP9, PVALB, TMEM40, CABP5        -> platelets
-#   cluster 9 : CD8 low, IL7R, GZMK, NKG7        -> possibly MAIT (see MAIT check)
+#   cluster 9 : CD8 low, IL7R, GZMK, KLRB1, SLC4A10, ZBTB16, ~90% TRAV1-2 with
+#               TRAJ33/12/20 (mait_check_by_cluster.csv)  -> MAIT cells
 #   cluster 4 : CD3E+, IL7R+, no clear markers   -> left unassigned
 lab <- c("0"  = "CD4 T (memory/naive)",
          "1"  = "CD14+ monocytes",
@@ -320,7 +326,7 @@ lab <- c("0"  = "CD4 T (memory/naive)",
          "6"  = "B cells",
          "7"  = "NK cells",
          "8"  = "CD16+ monocytes",
-         "9"  = "GZMK+ T",
+         "9"  = "MAIT cells",
          "10" = "pDC",
          "11" = "Platelets")
 stopifnot(all(obj$cluster %in% names(lab)))
@@ -339,6 +345,7 @@ check_marker("CD14+ monocytes", "CD14")
 check_marker("NK cells", "FGFBP2")
 check_marker("pDC", "LILRA4")
 check_marker("Platelets", "PPBP")
+check_marker("MAIT cells", "SLC4A10")
 
 save_plot(DimPlot(obj, group.by = "cell_type", label = TRUE, repel = TRUE, label.size = 3),
           "10_umap_cell_types", 10, 6)
@@ -349,15 +356,16 @@ save_plot(DotPlot(obj, features = marker_genes, group.by = "cell_type") + Rotate
 obj$test_group <- case_when(
   obj$cluster %in% NAIVE_CLUSTERS    ~ "Naive T",
   obj$cluster %in% EFFECTOR_CLUSTERS ~ "CD8 memory/effector T",
+  obj$cluster %in% MAIT_CLUSTERS     ~ "MAIT",
   TRUE ~ NA_character_)
-obj$test_group_strict <- case_when(
-  obj$cluster %in% NAIVE_CLUSTERS           ~ "Naive T",
-  obj$cluster %in% EFFECTOR_CLUSTERS_STRICT ~ "CD8 memory/effector T",
+obj$test_group_orig <- case_when(
+  obj$cluster %in% NAIVE_CLUSTERS         ~ "Naive T",
+  obj$cluster %in% EFFECTOR_CLUSTERS_ORIG ~ "CD8 memory/effector T + MAIT",
   TRUE ~ NA_character_)
 save_plot(DimPlot(obj, group.by = "test_group"), "12_umap_test_groups")
 
 t_types <- c("CD4 T (memory/naive)", "Naive T (CD4/CD8 unresolved)", "CD8 naive",
-             "CD8 GZMK+ memory/effector", "GZMK+ T")
+             "CD8 GZMK+ memory/effector", "MAIT cells")
 
 # ---- 11b. MAIT check (TCR + RNA, per cluster) -------------------------------
 # MAIT cells: TRAV1-2 with TRAJ33/12/20, KLRB1+ SLC4A10+ ZBTB16+.
@@ -387,12 +395,12 @@ summarise_groups <- function(group_col) {
               cells_in_expanded = sum(expanded),
               .groups = "drop")
 }
-res_main   <- summarise_groups("test_group")
-res_strict <- summarise_groups("test_group_strict")
-cat("\n== Main definition (clusters", EFFECTOR_CLUSTERS, ") ==\n");        print(res_main)
-cat("\n== Sensitivity (clusters", EFFECTOR_CLUSTERS_STRICT, "only) ==\n");  print(res_strict)
-write.csv(res_main,   file.path(RES_DIR, "clones_by_group_main.csv"),        row.names = FALSE)
-write.csv(res_strict, file.path(RES_DIR, "clones_by_group_sensitivity.csv"), row.names = FALSE)
+res_main <- summarise_groups("test_group")
+res_orig <- summarise_groups("test_group_orig")
+cat("\n== Main: naive / CD8 memory-effector (cluster", EFFECTOR_CLUSTERS, ") / MAIT ==\n"); print(res_main)
+cat("\n== Original definition (clusters", EFFECTOR_CLUSTERS_ORIG, ") ==\n");                 print(res_orig)
+write.csv(res_main, file.path(RES_DIR, "clones_by_group_main.csv"),                row.names = FALSE)
+write.csv(res_orig, file.path(RES_DIR, "clones_by_group_original_definition.csv"), row.names = FALSE)
 
 # expanded cells in ALL cell types (not only the test groups)
 by_type <- obj@meta.data %>%
@@ -573,12 +581,12 @@ save_plot(DotPlot(t11, features = c("CCL5", "NKG7", "GZMK", "GZMH", "CD8A",
                                  title = "Expanded vs non-expanded TCR 1+1 cells"),
           "16_dotplot_expanded_vs_not", 7, 3.5)
 
-# Cells of expanded clones that fall outside the two test groups. Clones whose
+# Cells of expanded clones that fall outside the test groups (naive, CD8, MAIT). Clones whose
 # cells all sit in the CD4 T cluster are plausible CD4 memory expansions; single
 # cells with monocyte/NK/pDC labels are more likely doublets or ambient TCR
 # (check the dbl_class column).
 outside <- obj@meta.data %>%
-  filter(expanded, !test_group %in% c("CD8 memory/effector T", "Naive T")) %>%
+  filter(expanded, is.na(test_group)) %>%
   select(cell_type, clone_id, clone_size, nFeature_RNA, nCount_RNA, percent.mt,
          any_of(c("dbl_class", "dbl_score")))
 write.csv(outside, file.path(RES_DIR, "expanded_cells_outside_test_groups.csv"))

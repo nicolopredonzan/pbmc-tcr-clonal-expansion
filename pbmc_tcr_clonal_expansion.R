@@ -32,7 +32,9 @@
 #     change the clustering and therefore the hard-coded cluster labels.
 #   - Donor sex: the 10x page reports a female donor, but XIST is not detected
 #     and Y-linked genes are detected in most cells (results/tables/sex_check.csv):
-#     the cells are from a male donor. This does not affect the question.
+#     the expression data are male. Metadata error or different donor cannot be
+#     distinguished from the data; reported, not corrected. No effect on this
+#     within-donor question.
 # =============================================================================
 
 suppressPackageStartupMessages({

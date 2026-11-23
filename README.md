@@ -73,13 +73,27 @@ Zoom on the T-cell clusters only (non-T clusters hidden; the few cells of expand
 
 ![T-cell clusters and expanded clones](results/figures/17_umap_T_cells_expanded_clones.png)
 
+## Sample identity check: donor sex
+Checking sex-linked genes is a cheap, standard control that the cells are the sample the metadata describe
+(in multi-donor studies it is also used to catch sample swaps or to split pooled donors).
+
+- **Metadata**: the 10x Genomics dataset page describes the donor as **female**.
+- **Data**: XIST (expressed from the inactive X, so present only in female cells) is detected in **0%** of cells
+  after QC, while Y-linked genes are detected in most cells: RPS4Y1 88%, DDX3Y 34%, USP9Y 24%
+  (`results/tables/sex_check.csv`). This pattern is that of **male** cells, not of a female sample with noise.
+- **Interpretation**: I cannot tell from the data alone whether the metadata on the dataset page are wrong or the
+  files come from a different donor than described. I report the discrepancy and do not correct it.
+- **Impact on this analysis**: none for the question asked (expansion vs. cell state *within* one donor; no sex-based
+  comparison is made). It would matter if this sample were combined with others or compared by sex.
+
+The general lesson I took from it: public metadata should be verified against the data before being used.
+
 ## Limitations
 - One donor, no replicate: no inferential statistics, no claim of generality.
 - The result is the expected one (memory/effector expansion): the project shows method, not discovery.
 - Marker-based labels; the CD4 T cluster mixes naive and memory cells.
 - Cells without a complete TCR 1+1 are not analysed; TCR capture may differ between cell states.
-- The 10x page states a female donor, but XIST is detected in no cell and Y-linked genes (e.g. RPS4Y1, 88% of cells)
-  are detected in most (`results/tables/sex_check.csv`): the cells are from a male donor. Not relevant to this question.
+- Donor sex does not match the metadata (see "Sample identity check" below).
 - Clones are defined on CDR3 amino acid sequences; identical CDR3s from different V genes or nucleotide sequences
   (convergent recombination, e.g. in MAIT cells) are counted as one clone.
 
